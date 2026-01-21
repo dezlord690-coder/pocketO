@@ -1,6 +1,6 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const tradeEngine = require('./tradingEngine.js'); // The self-learning AI engine
+const tradeEngine = require('./analysts.js'); 
 const config = require('./config.js');       // The Martingale/Settings config
 
 puppeteer.use(StealthPlugin());
