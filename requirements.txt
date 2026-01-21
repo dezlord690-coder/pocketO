@@ -1,0 +1,10 @@
+
+---
+
+### 3. File: `requirements.txt`
+In Node.js projects, dependencies are typically managed in a `package.json` file. However, if you specifically need a `requirements.txt` for documentation or cross-platform reference, create one with:
+
+```text
+technicalindicators
+fs (Built-in Node.js module)
+path (Built-in Node.js module)
