@@ -1,149 +1,123 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const tradeEngine = require('./analysts.js'); 
-const config = require('./config.js');       // The Martingale/Settings config
+const config = require('./config.js');
 
 puppeteer.use(StealthPlugin());
 
 let tradeState = {
-    active: false,
-    id: null,
-    stake: config.INITIAL_STAKE,
-    level: 0,
-    lastDirection: null,
-    lastVotesSnapshot: null,
-    tradeDurationMinutes: 1 // Default duration
+    active: false, id: null, stake: config.INITIAL_STAKE, level: 0,
+    lastDirection: null, lastVotesSnapshot: null, tradeDurationMinutes: 1
 };
 
 (async () => {
-    console.log("🚀 Launching Deep-Scan Engine & AI Bridge...");
+    console.log("\x1b[36m🚀 Launching AI-Driven Bridge...\x1b[0m");
     const browser = await puppeteer.launch({ 
-        headless: false, 
-        defaultViewport: null,
+        headless: false, defaultViewport: null,
         args: ['--no-sandbox', '--disable-web-security', '--start-maximized'] 
     });
     
     const [page] = await browser.pages();
     
-    // --- DEEP SCANNER: Finds the balance anywhere in the header ---
+    // --- UTILITY: Deep Scanner for Financial Balance ---
     const getAccountBalance = async () => {
         return await page.evaluate(() => {
-            const possibleSelectors = [
-                '.balance', '.user-balance', '[data-balance]', 
-                '.balance-value', '.current-balance'
-            ];
-            
-            for (let selector of possibleSelectors) {
+            const selectors = ['.balance', '.user-balance', '[data-balance]', '.balance-value', '.current-balance', '.platform-header__balance'];
+            for (let selector of selectors) {
                 const el = document.querySelector(selector);
-                if (el && el.innerText.includes('.')) {
-                    const val = parseFloat(el.innerText.replace(/[^0-9.]/g, ''));
-                    if (val > 0) return val;
-                }
-            }
-            // Fallback scanner from your code
-            const spans = Array.from(document.querySelectorAll('span, div'));
-            for (let s of spans) {
-                if (s.innerText.length < 20 && s.innerText.includes(',')) {
-                    const val = parseFloat(s.innerText.replace(/[^0-9.]/g, ''));
-                    if (val > 100) return val; 
-                }
+                if (el && el.innerText.includes('.')) return parseFloat(el.innerText.replace(/[^0-9.]/g, ''));
             }
             return 0;
         });
     };
 
-    // --- WEBSOCKET INJECTION (The reliable part of your code) ---
+    // --- WEBSOCKET INJECTION (Bridge Hook) ---
     await page.evaluateOnNewDocument(() => {
-        const OriginalWS = window.WebSocket;
-        window.activeSocket = null;
-        window.tradeTemplate = null;
-
-        // Shim to capture candle data from broker's WS (needs implementation)
+        const OriginalWS = window.WebSocket; window.activeSocket = null; window.tradeTemplate = null;
         window.marketCandles = { open: [], close: [], high: [], low: [], volume: [] };
-
         window.WebSocket = function(url, protocols) {
             const ws = new OriginalWS(url, protocols);
             if (url.includes('po.market')) {
                 window.activeSocket = ws;
+                console.log("%c[WS Bridge] Intercepted active socket.", "color: green;");
                 const originalSend = ws.send;
                 ws.send = function(data) {
-                    // Capture the template needed to fire subsequent trades
                     if (typeof data === 'string' && data.includes('openOrder')) {
                         window.tradeTemplate = data; 
+                        console.log("%c[WS Bridge] Captured trade template.", "color: green;");
                     }
                     return originalSend.apply(this, arguments);
                 };
             }
             return ws;
         };
-
-        // Function available in the browser context to place trades
         window.fireTrade = function(amount, asset) {
             if (!window.activeSocket || !window.tradeTemplate) return false;
             let payload = JSON.parse(window.tradeTemplate.substring(2));
-            payload[1].amount = parseFloat(amount);
-            payload[1].requestId = Date.now();
-            payload[1].asset = asset;
-            // Note: This uses the asset currently set by the UI. 
-            // To force a specific asset, you need to navigate to that asset's URL first.
+            const tradeData = Array.isArray(payload) ? payload : payload;
+            tradeData.amount = parseFloat(amount); tradeData.requestId = Date.now(); tradeData.asset = asset;
             window.activeSocket.send(`42${JSON.stringify(payload)}`);
             return true;
         };
     });
 
-    await page.goto('https://pocketoption.com/en/cabinet/demo-quick-high-low/', { waitUntil: 'networkidle2' });
-    
-    // ACTION REQUIRED: The bridge needs one manual trade to capture the template payload
-    console.log("\x1b[33m👉 ACTION REQUIRED: Manually execute one trade (CALL or PUT) on the screen to prime the bridge.\x1b[0m");
+    // Initial Navigation
+    await page.goto('https://pocketoption.com', { waitUntil: 'networkidle2' });
+
+    console.log("\n\x1b[36m--- SYSTEM STANDBY: Awaiting Auth & Data ---\x1b[0m");
 
     async function tick() {
-        // 1. ABSOLUTE LOCK: Do nothing if trade is running
-        if (tradeState.active) return;
-        
-        const isBridgeReady = await page.evaluate(() => !!window.tradeTemplate);
-        if (!isBridgeReady) return; // Wait for the user action
-
         try {
-            // 2. Get Data from the browser's memory (YOU MUST POPULATE window.marketCandles)
-            const marketData = await page.evaluate(() => {
-                if (window.marketCandles && window.marketCandles.close.length >= 250) {
-                    return window.marketCandles;
-                }
-                return null;
-            });
+            const url = page.url();
+            const balance = await getAccountBalance();
+            const isBridgePrimed = await page.evaluate(() => !!window.tradeTemplate);
+            const candlesLength = await page.evaluate(() => window.marketCandles.close.length);
 
-            if (!marketData) {
-                console.log("Waiting for sufficient market data (>= 250 candles) or candle interception failure.");
+            // 1. Authentication and Navigation Status
+            if (!url.includes('/cabinet/')) {
+                console.log(`[Status] 🟡 Not on trading page. URL: ${url}`);
+                return;
+            }
+            if (balance === 0) {
+                console.log(`[Status] 🟡 Logged in, but balance is zero. Check account type.`);
                 return;
             }
 
-            // 3. Check Martingale Sequence (Forced trade)
+            // 2. Data Monitoring Status
+            if (!isBridgePrimed) {
+                console.log(`[Status] 🟠 Waiting for manual trade to prime the bridge.`);
+                return;
+            }
+            if (candlesLength < 250) {
+                console.log(`[Status] 🟠 Analysts waiting for sufficient data: ${candlesLength}/250 candles.`);
+                return;
+            }
+
+            // --- Everything below this line means the system is fully operational ---
+            if (tradeState.active) return; // Lock during trade execution
+
+            // 3. System Operational Log (Once conditions are met)
+            console.log(`\n\x1b[32m[Status] ✅ System Operational. Balance: $${balance} | Candles: ${candlesLength}\x1b[0m`);
+
+            // Extract Data
+            const marketData = await page.evaluate(() => window.marketCandles);
+            
+            // Martingale Logic
             if (tradeState.level > 0 && tradeState.lastDirection) {
-                console.log(`⚠️ RECOVERY MODE: Level ${tradeState.level}. Forcing ${tradeState.lastDirection}...`);
+                console.log(`⚠️ RECOVERY: Level ${tradeState.level}. Re-entry: ${tradeState.lastDirection}`);
                 await executeTrade(tradeState.lastDirection, tradeState.tradeDurationMinutes);
                 return;
             }
 
-            // 4. Analyze Market using the AI Engine
+            // Run Analysis
             const analysis = await tradeEngine.getConsensus(marketData);
 
-            // 5. Decide (uses the 'signal' output: "CALL", "PUT", or "WAIT")
             if (analysis.signal !== "WAIT") {
-                
-                // 6. CHECK PAYOUT (UI Scraping)
-                const payout = await page.evaluate(() => {
-                    const el = document.querySelector('.btn-call .profit-percent'); 
-                    return el ? parseInt(el.innerText) : 0;
-                });
+                const payout = await page.evaluate(() => document.querySelector('.btn-call .profit-percent')?.innerText ? parseInt(document.querySelector('.btn-call .profit-percent').innerText) : 0);
+                if (payout < config.MIN_PAYOUT) return;
 
-                if (payout < config.MIN_PAYOUT) {
-                    console.log(`📉 Signal ignored. Payout ${payout}% < ${config.MIN_PAYOUT}%`);
-                    return;
-                }
-
-                console.log(`\n🧠 CONSENSUS: ${analysis.signal} for ${analysis.duration} mins (Score: ${analysis.score})`);
+                console.log(`\n🧠 SIGNAL: ${analysis.signal} | Confidence: ${analysis.confidence}`);
                 
-                // Store required data for the trade execution and the ML feedback loop
                 tradeState.lastDirection = analysis.signal;
                 tradeState.lastVotesSnapshot = analysis.vote_snapshot;
                 tradeState.tradeDurationMinutes = analysis.duration;
@@ -152,7 +126,9 @@ let tradeState = {
             }
 
         } catch (e) {
-            console.error("Tick Error:", e);
+            if (!e.message.includes('Execution context was destroyed')) {
+                console.error("Tick Error:", e.message);
+            }
         }
     }
 
@@ -160,62 +136,29 @@ let tradeState = {
         tradeState.active = true;
         tradeState.id = config.generateTradeId();
         
-        console.log(`⚡ [${tradeState.id}] EXECUTING ${direction} | $${tradeState.stake} | L${tradeState.level} | ${durationMinutes}m`);
-
-        // Capture balance immediately before firing the trade via WS bridge
         const startBal = await getAccountBalance();
+        console.log(`⚡ [${tradeState.id}] Stake: $${tradeState.stake}`);
 
-        const tradeFired = await page.evaluate((amount, asset) => {
-            // Assumes ASSET is already set in the browser UI context
-            return window.fireTrade(amount, asset); 
-        }, tradeState.stake, config.ASSET);
+        const tradeFired = await page.evaluate((amount, asset) => window.fireTrade(amount, asset), tradeState.stake, config.ASSET);
+        if (!tradeFired) { tradeState.active = false; return; }
 
-        if (!tradeFired) {
-            console.error("Failed to fire trade via WS bridge.");
-            tradeState.active = false;
-            return;
-        }
-
-        console.log(`⏳ [${tradeState.id}] Trade placed. Start Balance: $${startBal}. Waiting for result...`);
-
-        // WAIT for Trade Duration + buffer (convert minutes to milliseconds)
-        const waitTimeMs = (durationMinutes * 60 * 1000) + 7000; // 7s buffer for platform delay
+        const waitTimeMs = (durationMinutes * 60 * 1000) + 8000;
         await new Promise(r => setTimeout(r, waitTimeMs)); 
 
-        // CHECK RESULT via financial balance comparison
         const endBal = await getAccountBalance();
-        // Check if balance increased by roughly the expected profit amount
         const tradeWon = endBal > startBal; 
         
-        // PROCESS OUTCOME (Martingale Logic)
-        const nextState = config.getOutcome(tradeState.stake, tradeWon, tradeState.level);
-        
-        console.log(`🏁 [${tradeState.id}] Result: ${tradeWon ? "\x1b[32mWIN\x1b[0m" : "\x1b[31mLOSS\x1b[0m"}. End Balance: $${endBal}`);
+        console.log(`🏁 [${tradeState.id}] Result: ${tradeWon ? "\x1b[32mWIN\x1b[0m" : "\x1b[31mLOSS\x1b[0m"}`);
 
-        // === MACHINE LEARNING FEEDBACK LOOP ===
-        tradeEngine.updatePerformance(
-            tradeState.lastDirection,
-            tradeWon,
-            tradeState.lastVotesSnapshot
-        );
-        // ======================================
+        tradeEngine.updatePerformance(tradeState.lastDirection, tradeWon, tradeState.lastVotesSnapshot);
 
-        if (nextState.cooldown) {
-            console.log("🛑 MAX LOSS REACHED. Cooldown 60s.");
-            await new Promise(r => setTimeout(r, 60000));
-        }
+        const next = config.getOutcome(tradeState.stake, tradeWon, tradeState.level);
 
-        // Update State for the next tick
-        tradeState.stake = nextState.stake;
-        tradeState.level = nextState.level;
-        tradeState.active = false;
-        if (nextState.reset) {
-            tradeState.lastDirection = null;
-            tradeState.lastVotesSnapshot = null;
-        }
-        console.log(`💰 Next Stake: $${tradeState.stake} | Next Level: ${tradeState.level}`);
+        if (next.cooldown) await new Promise(r => setTimeout(r, 60000));
+
+        tradeState.stake = next.stake; tradeState.level = next.level; tradeState.active = false;
+        if (next.reset) { tradeState.lastDirection = null; tradeState.lastVotesSnapshot = null; }
     }
 
-    // Run the tick function every 5 seconds when idle
-    setInterval(tick, 5000);
+    setInterval(tick, 2000);
 })();
