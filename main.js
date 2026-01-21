@@ -10,6 +10,9 @@ let tradeState = {
     lastDirection: null, lastVotesSnapshot: null, tradeDurationMinutes: 1
 };
 
+// Global log tracker to keep the console clean
+let lastLogStatus = '';
+
 (async () => {
     console.log("\x1b[36m🚀 Launching AI-Driven Bridge...\x1b[0m");
     const browser = await puppeteer.launch({ 
@@ -19,52 +22,89 @@ let tradeState = {
     
     const [page] = await browser.pages();
     
-    // --- UTILITY: Deep Scanner for Financial Balance ---
+    // --- DEEP SCANNER ---
     const getAccountBalance = async () => {
         return await page.evaluate(() => {
-            const selectors = ['.balance', '.user-balance', '[data-balance]', '.balance-value', '.current-balance', '.platform-header__balance'];
-            for (let selector of selectors) {
+            const possibleSelectors = ['.balance', '.user-balance', '[data-balance]', '.balance-value', '.current-balance'];
+            for (let selector of possibleSelectors) {
                 const el = document.querySelector(selector);
-                if (el && el.innerText.includes('.')) return parseFloat(el.innerText.replace(/[^0-9.]/g, ''));
+                if (el && el.innerText.includes('.')) {
+                    const val = parseFloat(el.innerText.replace(/[^0-9.]/g, ''));
+                    if (val > 0) return val;
+                }
+            }
+            const spans = Array.from(document.querySelectorAll('span, div'));
+            for (let s of spans) {
+                if (s.innerText.length < 20 && (s.innerText.includes(',') || s.innerText.includes('.'))) {
+                    const val = parseFloat(s.innerText.replace(/[^0-9.]/g, ''));
+                    if (val > 100) return val; 
+                }
             }
             return 0;
         });
     };
 
-    // --- WEBSOCKET INJECTION (Bridge Hook) ---
+    // --- WEBSOCKET INJECTION (Improved Listening) ---
     await page.evaluateOnNewDocument(() => {
         const OriginalWS = window.WebSocket; window.activeSocket = null; window.tradeTemplate = null;
         window.marketCandles = { open: [], close: [], high: [], low: [], volume: [] };
+        
         window.WebSocket = function(url, protocols) {
             const ws = new OriginalWS(url, protocols);
             if (url.includes('po.market')) {
                 window.activeSocket = ws;
-                console.log("%c[WS Bridge] Intercepted active socket.", "color: green;");
+                
+                                ws.addEventListener('message', (event) => {
+                    try {
+                        const msg = event.data;
+                        if (typeof msg === 'string' && msg.startsWith('42')) {
+                            const parsed = JSON.parse(msg.substring(2));
+                            
+                            // Check for 'history' or 'candles' topic and extract the data array
+                            if (parsed[0] === 'history' || parsed[0] === 'candles') {
+                                const data = parsed[1];
+                                
+                                // Map the raw numeric values for technicalindicators library
+                                window.marketCandles.open = data.map(c => parseFloat(c[1]));
+                                window.marketCandles.close = data.map(c => parseFloat(c[2]));
+                                window.marketCandles.high = data.map(c => parseFloat(c[3]));
+                                window.marketCandles.low = data.map(c => parseFloat(c[4]));
+                                
+                                // Note: Volume is often null in quick H/L interface, so we omit volume mapping here.
+                            }
+                            // Add handling for live 'candle' updates if needed later
+                        }
+                    } catch (e) {}
+                });
+
+                });
+
                 const originalSend = ws.send;
                 ws.send = function(data) {
                     if (typeof data === 'string' && data.includes('openOrder')) {
                         window.tradeTemplate = data; 
-                        console.log("%c[WS Bridge] Captured trade template.", "color: green;");
                     }
                     return originalSend.apply(this, arguments);
                 };
             }
             return ws;
         };
+
         window.fireTrade = function(amount, asset) {
             if (!window.activeSocket || !window.tradeTemplate) return false;
             let payload = JSON.parse(window.tradeTemplate.substring(2));
-            const tradeData = Array.isArray(payload) ? payload : payload;
-            tradeData.amount = parseFloat(amount); tradeData.requestId = Date.now(); tradeData.asset = asset;
+            const tradeData = Array.isArray(payload[1]) ? payload[1] : (payload.amount ? payload : payload[1]);
+            tradeData.amount = parseFloat(amount); 
+            tradeData.requestId = Date.now(); 
+            tradeData.asset = asset;
             window.activeSocket.send(`42${JSON.stringify(payload)}`);
             return true;
         };
     });
 
-    // Initial Navigation
     await page.goto('https://pocketoption.com', { waitUntil: 'networkidle2' });
 
-    console.log("\n\x1b[36m--- SYSTEM STANDBY: Awaiting Auth & Data ---\x1b[0m");
+    console.log("\n\x1b[36m--- SYSTEM STANDBY ---\x1b[0m");
 
     async function tick() {
         try {
@@ -73,51 +113,40 @@ let tradeState = {
             const isBridgePrimed = await page.evaluate(() => !!window.tradeTemplate);
             const candlesLength = await page.evaluate(() => window.marketCandles.close.length);
 
-            // 1. Authentication and Navigation Status
-            if (!url.includes('/cabinet/')) {
-                console.log(`[Status] 🟡 Not on trading page. URL: ${url}`);
-                return;
-            }
-            if (balance === 0) {
-                console.log(`[Status] 🟡 Logged in, but balance is zero. Check account type.`);
-                return;
-            }
+            // Manage Status Output
+            let status = '';
+            if (!url.includes('/cabinet/')) status = "🟡 Navigation: Enter Trading Cabinet.";
+            else if (balance === 0) status = "🟡 Balance: $0.00 (Switch to Demo)";
+            else if (!isBridgePrimed) status = "🟠 Bridge: Waiting for manual trade to prime socket.";
+            else if (candlesLength < 250) status = `🟠 Data: Warming up analysts... (${candlesLength}/250)`;
+            else status = "✅ System Operational. Running 17 Analysts...";
 
-            // 2. Data Monitoring Status
-            if (!isBridgePrimed) {
-                console.log(`[Status] 🟠 Waiting for manual trade to prime the bridge.`);
-                return;
-            }
-            if (candlesLength < 250) {
-                console.log(`[Status] 🟠 Analysts waiting for sufficient data: ${candlesLength}/250 candles.`);
-                return;
+            if (status !== lastLogStatus) {
+                console.log(`[Status] ${status}`);
+                lastLogStatus = status;
             }
 
-            // --- Everything below this line means the system is fully operational ---
-            if (tradeState.active) return; // Lock during trade execution
+            // Execution Logic
+            if (candlesLength < 250 || tradeState.active || !url.includes('/cabinet/') || balance === 0) return;
 
-            // 3. System Operational Log (Once conditions are met)
-            console.log(`\n\x1b[32m[Status] ✅ System Operational. Balance: $${balance} | Candles: ${candlesLength}\x1b[0m`);
-
-            // Extract Data
             const marketData = await page.evaluate(() => window.marketCandles);
             
-            // Martingale Logic
             if (tradeState.level > 0 && tradeState.lastDirection) {
-                console.log(`⚠️ RECOVERY: Level ${tradeState.level}. Re-entry: ${tradeState.lastDirection}`);
                 await executeTrade(tradeState.lastDirection, tradeState.tradeDurationMinutes);
                 return;
             }
 
-            // Run Analysis
             const analysis = await tradeEngine.getConsensus(marketData);
 
             if (analysis.signal !== "WAIT") {
-                const payout = await page.evaluate(() => document.querySelector('.btn-call .profit-percent')?.innerText ? parseInt(document.querySelector('.btn-call .profit-percent').innerText) : 0);
+                const payout = await page.evaluate(() => {
+                    const el = document.querySelector('.btn-call .profit-percent') || document.querySelector('.profit-percent');
+                    return el ? parseInt(el.innerText) : 0;
+                });
+                
                 if (payout < config.MIN_PAYOUT) return;
 
-                console.log(`\n🧠 SIGNAL: ${analysis.signal} | Confidence: ${analysis.confidence}`);
-                
+                console.log(`\n🧠 SIGNAL: ${analysis.signal} | Score: ${analysis.score}`);
                 tradeState.lastDirection = analysis.signal;
                 tradeState.lastVotesSnapshot = analysis.vote_snapshot;
                 tradeState.tradeDurationMinutes = analysis.duration;
@@ -126,34 +155,28 @@ let tradeState = {
             }
 
         } catch (e) {
-            if (!e.message.includes('Execution context was destroyed')) {
-                console.error("Tick Error:", e.message);
-            }
+            if (!e.message.includes('destroyed')) console.error("Tick Error:", e.message);
         }
     }
 
     async function executeTrade(direction, durationMinutes) {
         tradeState.active = true;
         tradeState.id = config.generateTradeId();
-        
         const startBal = await getAccountBalance();
-        console.log(`⚡ [${tradeState.id}] Stake: $${tradeState.stake}`);
 
         const tradeFired = await page.evaluate((amount, asset) => window.fireTrade(amount, asset), tradeState.stake, config.ASSET);
         if (!tradeFired) { tradeState.active = false; return; }
 
-        const waitTimeMs = (durationMinutes * 60 * 1000) + 8000;
-        await new Promise(r => setTimeout(r, waitTimeMs)); 
+        console.log(`⚡ [${tradeState.id}] Stake: $${tradeState.stake} | Waiting ${durationMinutes}m...`);
+        await new Promise(r => setTimeout(r, (durationMinutes * 60 * 1000) + 8000)); 
 
         const endBal = await getAccountBalance();
         const tradeWon = endBal > startBal; 
         
-        console.log(`🏁 [${tradeState.id}] Result: ${tradeWon ? "\x1b[32mWIN\x1b[0m" : "\x1b[31mLOSS\x1b[0m"}`);
-
+        console.log(`🏁 [${tradeState.id}] Result: ${tradeWon ? "WIN" : "LOSS"}`);
         tradeEngine.updatePerformance(tradeState.lastDirection, tradeWon, tradeState.lastVotesSnapshot);
 
         const next = config.getOutcome(tradeState.stake, tradeWon, tradeState.level);
-
         if (next.cooldown) await new Promise(r => setTimeout(r, 60000));
 
         tradeState.stake = next.stake; tradeState.level = next.level; tradeState.active = false;
